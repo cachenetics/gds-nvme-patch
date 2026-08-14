@@ -1,7 +1,10 @@
 # gds-nvme-patch
 
-Makes NVIDIA **GPUDirect Storage (GDS)** work on modern Linux kernels (6.18+), which NVIDIA's own
-driver support does not cover yet.
+### GPUDirect Storage (GDS) for the NVIDIA CMP 170HX - and any GPU on a modern (6.18+) Linux kernel
+
+Makes NVIDIA **GPUDirect Storage** work on kernels 6.18+, which NVIDIA's own driver support does not
+cover yet. Built and tested on the **CMP 170HX**; the patch itself is GPU-agnostic (it patches the
+NVMe driver, not the GPU).
 
 Small patch to the kernel's NVMe driver + an installer that maintains it across kernel updates.
 
