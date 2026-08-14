@@ -60,6 +60,15 @@ you need, the anchors need extending for that version (open an issue with your `
 
 ## Usage
 
+**First, run the read-only probe** (touches nothing on your system) to check the box is ready and
+that the patch will apply to your kernel - send its output back before running the installer:
+
+```sh
+sudo bash probe.sh | tee gds-probe.txt
+```
+
+Then:
+
 ```sh
 sudo ./install.sh            # detect, patch, build, install into initramfs, set data=ordered
 sudo ./install.sh --dry-run  # detect + patch + build only; do not touch /boot or /lib/modules
