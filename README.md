@@ -23,18 +23,37 @@ and verified enabling GDS on an NVIDIA CMP 170HX, but nothing here is 170HX-spec
   build = an unbootable kernel. The installer keeps your other installed kernel untouched as a
   rescue, backs up the stock module + initramfs, and the patch is **byte-identical to stock until
   nvidia-fs actually registers** (so boot/normal I/O is unaffected). But you accept the risk.
-- **Tested on exactly one configuration:** CachyOS, kernel 7.1.5, x86_64, nvidia-open 610.43.03 +
-  nvidia-fs 2.29, a single NVMe with root on it. Everything else is *designed to work* but
-  **untested** - treat it as such.
+- **What is actually tested:** on CachyOS / kernel 7.1.5 / x86_64 / nvidia-open 610.43.03 +
+  nvidia-fs 2.29 (root on the NVMe), the **full `install.sh` and `uninstall.sh` were run
+  end-to-end** - install produced a working GDS transfer with data-integrity verify passing, and
+  uninstall cleanly restored stock (GDS gone). The refuse/edge paths (non-root, bad kernel,
+  anchor-mismatch) are tested. The **patch application on kernel 7.0** (Ubuntu 26.04) is validated
+  against mainline v7.0 source, but a **full install on a real Debian/Ubuntu box has not been
+  run** - the `update-initramfs`/`dracut`/`gcc`/systemd-boot paths are coded + reviewed but
+  unexercised. **Mode B** (live reload) and **Mode C** (livepatch) are unverified (see
+  `docs/DEPLOYMENT-MODES.md`). Treat anything outside the first sentence as designed-but-untested.
 - **The patcher refuses (does not apply) if it cannot match your kernel's nvme source exactly.**
   That is deliberate: silently mispatching the root-disk driver is the one outcome worse than
   "unsupported". If it refuses on your kernel, the anchors need updating for that version - open
   an issue with your `drivers/nvme/host/pci.c`.
 
-## Requirements
+## Kernel support (which versions the patch applies to)
 
-- Linux **kernel 6.18+** (uses the `blk_rq_dma_map_iter` nvme path). On <= 6.17 use NVIDIA's
-  MOFED/DOCA nvme patch instead - the installer will detect this and tell you.
+The patch targets the `blk_rq_dma_map_iter` nvme path (kernel 6.18+). Because it edits `pci.c` by
+matching code anchors, the exact code shape has to match. Current state:
+
+| Kernel   | Result            | Notes                                                        |
+|----------|-------------------|--------------------------------------------------------------|
+| 7.0      | **applies**       | Ubuntu 26.04's kernel. `nvme_unmap_iter` guard auto-skipped. |
+| 7.1.x    | **applies**       | Verified end-to-end (real GDS transfer).                     |
+| 6.17/6.18| refuses (safely)  | Iterator API present but different code shape; anchors TODO. |
+| <= 6.17* | refuses (legacy)  | Pre-iterator nvme API; use NVIDIA's MOFED/DOCA patch instead.|
+
+The patcher **refuses rather than mispatching** whenever the anchors do not match - so an
+unsupported kernel fails safely, it never corrupts the root-disk driver. If it refuses on a kernel
+you need, the anchors need extending for that version (open an issue with your `pci.c`).
+
+## Requirements
 - x86_64, an NVMe drive, kernel headers for the running kernel installed.
 - `nvidia-open` (or nvidia) driver + `nvidia-fs` built/loadable, CUDA + cuFile (for `gdscheck`/`gdsio`).
 - A supported PCIe topology for the P2P itself (see "Will the DMA actually work?" below).
@@ -61,8 +80,12 @@ gdsio -D <dir on the NVMe> -d 0 -w 1 -s 32M -i 1M -x 0 -I 1 -V   # write+verify 
    from the kernel's own build flags), module compression (`.ko` / `.ko.zst` / `.ko.xz`), the
    initramfs generator (`mkinitcpio` / `dracut` / `update-initramfs`), and the bootloader
    (`grub` / `systemd-boot`).
-2. **Fetches** the matching nvme host source for your exact kernel (stable tree), or uses your
-   distro's kernel source if present.
+2. **Acquires** the matching nvme host source, in this order: an explicit `--src-dir=PATH`, then an
+   auto-detected local kernel source tree, then the mainline stable tree (with version-tag
+   normalization, e.g. a distro `7.0.0` maps to the tag `v7.0`). If your distro patches its nvme
+   driver so the mainline source does not match, the patcher refuses (safely) - point it at your
+   distro's own source: `apt-get source linux` (Debian/Ubuntu) or the kernel-devel tree (Fedora),
+   then `--src-dir=<that path>`.
 3. **Patches** `pci.c` (refuses on any anchor mismatch) and **builds** `nvme.ko` out-of-tree
    against your installed headers, with the detected toolchain. (MODVERSIONS on or off both work;
    off loads by name, on matches CRCs from your headers' Module.symvers.)

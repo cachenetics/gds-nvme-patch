@@ -11,22 +11,100 @@ NVME_SRC_FILES=(pci.c core.c nvme.h fabrics.h trace.h)
 # v<version> from Greg KH's stable tree. Aborts (does not fall back to a
 # different version) if the exact tag 404s - per spec, silently building
 # against the wrong kernel source is worse than stopping.
-fetch_nvme_source() {
-	local ver="$1" dest="$2" f url http_code
+# Copy the needed nvme host sources from a local kernel source tree.
+_copy_nvme_from_dir() {
+	local srcroot="$1" dest="$2" hostdir f
+	hostdir="${srcroot%/}/drivers/nvme/host"
+	[ -f "${hostdir}/pci.c" ] || { err "no drivers/nvme/host/pci.c under '${srcroot}'"; return 1; }
 	mkdir -p "$dest"
 	for f in "${NVME_SRC_FILES[@]}"; do
-		url="https://raw.githubusercontent.com/gregkh/linux/v${ver}/drivers/nvme/host/${f}"
-		info "fetching ${f} (v${ver})"
-		http_code="$(curl -sL -o "${dest}/${f}" -w '%{http_code}' "$url" || echo 000)"
-		if [ "$http_code" != "200" ]; then
-			err "fetch failed for ${f}: HTTP ${http_code} (${url})"
-			err "tag v${ver} may not exist in the stable tree for this exact kernel version."
-			err "stopping - refusing to silently substitute a different kernel's source."
-			return 1
+		if [ -f "${hostdir}/${f}" ]; then
+			cp -f "${hostdir}/${f}" "${dest}/${f}"
+		else
+			warn "note: ${f} not in local source tree (may be fine; pci.c is the one that matters)"
 		fi
 	done
 	return 0
 }
+
+# Auto-detect a local kernel source tree that carries the .c files (not just
+# headers). Common on distros that ship a linux-source package or a source
+# symlink. Echoes the path, or nothing.
+_find_local_nvme_source() {
+	local kver cand
+	kver="$(uname -r)"
+	for cand in \
+		"/lib/modules/${kver}/source" \
+		"/lib/modules/${kver}/build" \
+		/usr/src/linux-source-*/ \
+		/usr/src/linux-headers-"${kver}" \
+		"/usr/src/linux-${kver}" \
+		/usr/src/linux; do
+		[ -f "${cand%/}/drivers/nvme/host/pci.c" ] && { printf '%s\n' "${cand%/}"; return 0; }
+	done
+	return 1
+}
+
+# Fetch the nvme host sources from the mainline stable tree, trying tag
+# candidates so a distro version like "7.0.0" maps to the real tag "v7.0".
+_fetch_nvme_from_mainline() {
+	local ver="$1" dest="$2" f url http_code tag tags mm
+	mkdir -p "$dest"
+	# candidate tags, most-specific first
+	tags="v${ver}"
+	mm="$(printf '%s' "$ver" | grep -oE '^[0-9]+\.[0-9]+')"
+	# a X.Y.0 release is tagged vX.Y (no trailing .0) in the git tree
+	case "$ver" in
+	*.0) tags="${tags} v${mm}" ;;
+	esac
+	tag=""
+	for t in $tags; do
+		http_code="$(curl -sL -o "${dest}/pci.c" -w '%{http_code}' \
+			"https://raw.githubusercontent.com/gregkh/linux/${t}/drivers/nvme/host/pci.c" 2>/dev/null || echo 000)"
+		if [ "$http_code" = "200" ]; then tag="$t"; break; fi
+	done
+	if [ -z "$tag" ]; then
+		err "could not find a stable-tree tag for kernel ${ver} (tried: ${tags})."
+		err "Point the installer at your distro's own kernel source instead:"
+		err "  --src-dir=/path/to/linux-source   (e.g. apt-get source linux, or dnf's kernel-devel tree)"
+		err "Refusing to silently substitute a different kernel's source."
+		return 1
+	fi
+	info "using mainline stable tag ${tag} for kernel ${ver}"
+	for f in "${NVME_SRC_FILES[@]}"; do
+		[ "$f" = "pci.c" ] && continue
+		http_code="$(curl -sL -o "${dest}/${f}" -w '%{http_code}' \
+			"https://raw.githubusercontent.com/gregkh/linux/${tag}/drivers/nvme/host/${f}" 2>/dev/null || echo 000)"
+		[ "$http_code" = "200" ] || warn "note: ${f} not at ${tag} (continuing; pci.c is what matters)"
+	done
+	return 0
+}
+
+# Distro-friendly source acquisition:
+#   1. explicit --src-dir (use the distro's exact source - most robust),
+#   2. an auto-detected local kernel source tree,
+#   3. mainline stable tree with version-tag normalization.
+# If the mainline pci.c does not match your distro's patched nvme driver, the
+# patcher refuses (safely); use --src-dir with your distro source to fix that.
+get_nvme_source() {
+	local ver="$1" dest="$2" src_dir="${3:-}" local_src
+	if [ -n "$src_dir" ]; then
+		info "using kernel source from --src-dir: $src_dir"
+		_copy_nvme_from_dir "$src_dir" "$dest" || return 1
+		return 0
+	fi
+	if local_src="$(_find_local_nvme_source)"; then
+		info "using local kernel source tree: $local_src"
+		_copy_nvme_from_dir "$local_src" "$dest" || return 1
+		return 0
+	fi
+	info "no local kernel source found; fetching from mainline stable tree"
+	_fetch_nvme_from_mainline "$ver" "$dest" || return 1
+	return 0
+}
+
+# back-compat alias (older call sites)
+fetch_nvme_source() { get_nvme_source "$1" "$2" "${3:-}"; }
 
 write_build_makefile() {
 	local dest="$1"

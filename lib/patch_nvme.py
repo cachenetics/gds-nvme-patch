@@ -25,9 +25,17 @@ p = sys.argv[1] if len(sys.argv) > 1 else "pci.c"
 s = open(p).read()
 orig = s
 
-def repl(anchor, new, why):
+def repl(anchor, new, why, optional=False):
     global s
     n = s.count(anchor)
+    if optional and n == 0:
+        # Some kernel versions in the 6.18-7.x range do not have this exact
+        # code (e.g. nvme_unmap_iter was added after 7.0). Skipping an absent
+        # OPTIONAL anchor is safe only when its purpose is covered elsewhere;
+        # each optional repl documents why. Never make a load-bearing anchor
+        # optional.
+        print(f"note: optional anchor [{why}] not present in this kernel - skipping (covered elsewhere)")
+        return
     assert n == 1, f"anchor for [{why}] found {n} times (need 1):\n{anchor[:160]}"
     s = s.replace(anchor, new)
 
@@ -213,7 +221,10 @@ repl(
 		return;	/* GPU addrs (nvidia_p2p) released in nvme_unmap_data */
 
 	if (!blk_rq_dma_unmap(req, dev, state, iter->len, iter->p2pdma.map)) {""",
-"nvme_unmap_iter nvfs guard")
+"nvme_unmap_iter nvfs guard", optional=True)
+# ^ optional: kernel 7.0 has no nvme_unmap_iter (added in 7.1). On 7.0 the map
+#   error path calls nvme_unmap_data() instead, which the nvfs branch (step 6)
+#   already guards - so GPU DMA addresses are never wrongly unmapped either way.
 
 # ---- 6. nvme_unmap_data: nvfs branch - put N mgroup refs, free dma_vecs w/o dma_unmap ----
 repl(

@@ -25,22 +25,30 @@ abort() { err "$*"; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: install.sh [--dry-run] [--force] [-h|--help]
+Usage: install.sh [--dry-run] [--force] [--src-dir=PATH] [-h|--help]
 
-  --dry-run  Detect, fetch, patch, build, and verify vermagic only. Does not
-             touch /lib/modules, /boot, depmod, or reload anything.
-  --force    Proceed past non-fatal safety refusals (e.g. no rescue kernel
-             found for Mode A). Never bypasses the patcher's anchor asserts.
-  -h, --help Show this help.
+  --dry-run      Detect, fetch, patch, build, and verify vermagic only. Does
+                 not touch /lib/modules, /boot, depmod, or reload anything.
+  --force        Proceed past non-fatal safety refusals (e.g. no rescue kernel
+                 found for Mode A). Never bypasses the patcher's anchor asserts.
+  --src-dir=PATH Use kernel source from PATH (must contain
+                 drivers/nvme/host/pci.c) instead of fetching from mainline.
+                 Use this if your distro patches its nvme driver so the mainline
+                 source does not match (e.g. 'apt-get source linux' on Ubuntu,
+                 then --src-dir=./linux-<ver>). Also used automatically if a
+                 local kernel source tree is detected.
+  -h, --help     Show this help.
 EOF
 }
 
 DRY_RUN=0
 FORCE=0
+SRC_DIR=""
 for a in "$@"; do
 	case "$a" in
 	--dry-run) DRY_RUN=1 ;;
 	--force) FORCE=1 ;;
+	--src-dir=*) SRC_DIR="${a#*=}" ;;
 	-h | --help)
 		usage
 		exit 0
@@ -52,6 +60,10 @@ for a in "$@"; do
 		;;
 	esac
 done
+
+if [ -n "$SRC_DIR" ] && [ ! -f "${SRC_DIR%/}/drivers/nvme/host/pci.c" ]; then
+	abort "--src-dir='$SRC_DIR' does not contain drivers/nvme/host/pci.c"
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
 	abort "must be run as root (sudo ./install.sh ${*})"
@@ -88,8 +100,8 @@ fi
 
 # ---- 2. fetch + era check + patch + build ----------------------------------
 
-fetch_nvme_source "$DETECTED_KVER_BARE" "$WORKDIR" \
-	|| abort "source fetch failed - see above. Stopping rather than guessing a nearby version."
+get_nvme_source "$DETECTED_KVER_BARE" "$WORKDIR" "$SRC_DIR" \
+	|| abort "kernel source acquisition failed - see above. If your distro patches its kernel, point at its source with --src-dir=<path> (e.g. 'apt-get source linux' on Debian/Ubuntu)."
 
 detect_nvme_api_era "$WORKDIR/pci.c" || abort \
 	"this kernel's pci.c uses the legacy blk_rq_map_sg/dma_map_sg nvme API (pre-6.18), not blk_rq_dma_map_iter. Use NVIDIA's MOFED/DOCA nvme patch for this kernel instead - this repo only targets the 6.18+ iterator API."
