@@ -69,9 +69,35 @@ sudo bash probe.sh | tee gds-probe.txt   # read-only: checks readiness, touches 
 sudo ./install.sh                        # build + install + kernel-update hook
 # reboot if root is on NVMe, then:
 gdscheck.py -p                           # NVMe should read 'Supported' / 'nvfs'
+
+sudo ./uninstall.sh                      # revert: restore the stock driver, remove hooks
 ```
 
-Uninstall: `sudo ./uninstall.sh`
+---
+
+## Using GDS after it's installed
+
+Installing the patch makes GDS **available** - it does not accelerate anything on its own, and it
+does **not** take over your model loading. Normal reads (`torch.load`, `open().read()`,
+`np.fromfile`) keep going through the CPU path exactly as before. Your code has to *ask* for GDS,
+through NVIDIA's cuFile API - either directly, or via a library that speaks it:
+
+```python
+# kvikio (RAPIDS) - reads a file straight into GPU memory
+import cupy, kvikio
+buf = cupy.empty(nbytes, dtype=cupy.uint8)
+with kvikio.CuFile("weights.bin", "r") as f:
+    f.read(buf)
+```
+
+Other options: NVIDIA **DALI**, any framework with a GDS/cuFile data path, or the cuFile C API
+(`cuFileHandleRegister` + `cuFileRead`/`cuFileWrite`) directly.
+
+Confirm a transfer actually went over GDS (write + verify):
+
+```sh
+gdsio -D <dir on the NVMe> -d 0 -w 1 -s 32M -i 1M -x 0 -I 1 -V
+```
 
 ---
 
