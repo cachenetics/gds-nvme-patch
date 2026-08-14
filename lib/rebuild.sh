@@ -244,6 +244,45 @@ _gds_rebuild_inner() {
 		return 0
 	fi
 
+	# Back up this kernel's current initramfs image(s) BEFORE regenerating,
+	# mirroring install.sh's own initramfs backup step - without this,
+	# uninstall.sh has nothing under ${backup_dir}/initramfs/ to restore for a
+	# kernel patched via this hook, so a "successful" uninstall would leave
+	# the patched module embedded in the initramfs. This is correctly ordered
+	# AFTER the module install above: the module on disk is already patched,
+	# but the initramfs still embeds the stock module until regen runs below.
+	# Never abort on a backup problem here - only warn - this whole function
+	# stays fail-safe; uninstall.sh has its own fallback (regen from scratch)
+	# if this backup ends up missing anyway.
+	local initramfs_backup_dir="${backup_dir}/initramfs"
+	if ! mkdir -p "$initramfs_backup_dir" 2>/dev/null; then
+		warn "$kver: could not create $initramfs_backup_dir, continuing without an initramfs backup"
+	else
+		local initramfs_files=() img img_backup
+		case "$DETECTED_INITRD_GEN" in
+		mkinitcpio)
+			while IFS= read -r img; do
+				[ -n "$img" ] && initramfs_files+=("$img")
+			done < <(mkinitcpio_preset_images "$mkinitcpio_preset")
+			;;
+		dracut)
+			initramfs_files+=("/boot/initramfs-${kver}.img")
+			;;
+		update-initramfs)
+			initramfs_files+=("/boot/initrd.img-${kver}")
+			;;
+		esac
+		for img in "${initramfs_files[@]}"; do
+			[ -f "$img" ] || continue
+			img_backup="${initramfs_backup_dir}/$(basename "$img")"
+			if [ -f "$img_backup" ]; then
+				info "$kver: initramfs already backed up at $img_backup"
+			elif ! cp -a "$img" "$img_backup"; then
+				warn "$kver: failed to back up initramfs $img, continuing without it"
+			fi
+		done
+	fi
+
 	info "$kver: regenerating initramfs ($DETECTED_INITRD_GEN)"
 	if ! regen_initramfs "$DETECTED_INITRD_GEN" "$mkinitcpio_preset"; then
 		warn "$kver: initramfs regeneration failed - the module is installed but the initramfs may still embed the stock one, check manually"

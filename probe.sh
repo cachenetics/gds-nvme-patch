@@ -115,7 +115,13 @@ if command -v curl >/dev/null 2>&1; then
 		check1 'if (!blk_rq_dma_map_iter_next(req, dma_dev, iter))' "prp iter_next site"
 		check1 '} while (blk_rq_dma_map_iter_next(req, nvmeq->dev->dev, iter));' "sgl iter_next site"
 		check1 'static void nvme_free_descriptors(struct request *req)' "insertion point"
-		if [ "$miss" = "0" ]; then ok "your kernel's nvme layout matches the patch anchors - the patch is expected to APPLY cleanly"
+		check1 'struct nvme_sgl_desc *meta_descriptor;' "nvme_iod struct field insertion point"
+		check1 'if (iod->flags & IOD_SINGLE_SEGMENT) {' "nvme_unmap_data nvfs-branch anchor"
+		# Covers 5 of the patcher's 6 anchor sections (the 6th, nvme_unmap_iter,
+		# is itself optional in lib/patch_nvme.py - skipped on kernels that
+		# don't have it). Not exhaustive of every anchor inside each section -
+		# the real patcher (lib/patch_nvme.py) is always the final authority.
+		if [ "$miss" = "0" ]; then ok "your kernel's nvme layout matches the load-bearing anchors checked here - the patch is likely to APPLY cleanly (not exhaustive; the real patcher is authoritative)"
 		else warn "one or more patch anchors do not match your kernel's pci.c - the installer will REFUSE (safely) on this kernel. Send us this pci.c ($got) and we can add support."; VERDICT_WARN+=("anchors"); fi
 		note "(Note: this checked MAINLINE $got. If your distro patched its nvme driver, use install.sh --src-dir with your distro source; the real patcher is authoritative.)"
 	else warn "could not fetch a mainline tag for kernel $BARE (tried $tag $tag2) - offline, or an unusual version. install.sh --src-dir can use your local source."; fi

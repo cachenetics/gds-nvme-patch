@@ -96,7 +96,7 @@ detect_persist_family() {
 install_persist() {
 	local family="$1" target="/usr/lib/gds-nvme-patch"
 	info "installing persistence: copying tool to $target"
-	mkdir -p "$target/lib" "$target/hooks"
+	mkdir -p "$target/lib"
 	install -m 0644 "$REPO_ROOT/lib/patch_nvme.py" "$target/lib/patch_nvme.py"
 	install -m 0644 "$REPO_ROOT/lib/detect.sh" "$target/lib/detect.sh"
 	install -m 0644 "$REPO_ROOT/lib/build.sh" "$target/lib/build.sh"
@@ -378,19 +378,30 @@ else
 	info "root is not on nvme - attempting a live module reload (Mode B)."
 	warn "Mode B live reload is implemented but UNVERIFIED end-to-end (our test hardware had root on nvme, so this path only ran detection there, not a real reload)."
 	nvme_usage="$(lsmod | awk '$1=="nvme"{print $3}')"
-	if [ -n "$nvme_usage" ] && [ "$nvme_usage" != "0" ]; then
+	if [ -z "$nvme_usage" ]; then
+		info "nvme module is not currently loaded - modprobe nvme"
+		modprobe nvme
+		info "live reload done (fresh load). Verify with: lsmod | grep nvme ; dmesg | tail"
+	elif [ "$nvme_usage" != "0" ]; then
 		warn "nvme module is in use (lsmod usage count != 0) - not force-unloading."
 		warn "Unmount/detach anything on other NVMe namespaces, then rerun, or rmmod/modprobe manually:"
 		warn "  rmmod nvme && modprobe nvme"
 	else
 		info "rmmod nvme && modprobe nvme"
-		if rmmod nvme 2>/tmp/gds-nvme-patch-rmmod.err; then
+		err_f=""
+		err_f="$(mktemp 2>/dev/null)" || err_f=""
+		if rmmod nvme 2>"${err_f:-/dev/null}"; then
 			modprobe nvme
 			info "live reload done. Verify with: lsmod | grep nvme ; dmesg | tail"
 		else
-			warn "rmmod nvme failed: $(cat /tmp/gds-nvme-patch-rmmod.err 2>/dev/null)"
+			if [ -n "$err_f" ]; then
+				warn "rmmod nvme failed: $(cat "$err_f" 2>/dev/null)"
+			else
+				warn "rmmod nvme failed (could not capture stderr - mktemp failed)"
+			fi
 			warn "the new module is installed and will take effect on next boot/initramfs load regardless."
 		fi
+		[ -n "$err_f" ] && rm -f "$err_f"
 	fi
 	info "=== install complete. Module + initramfs + cmdline updated; effective now (live) and persists across reboots. ==="
 fi
@@ -399,7 +410,7 @@ fi
 
 if [ "$PERSIST" -eq 1 ]; then
 	if [ -n "$PERSIST_FAMILY" ]; then
-		install_persist "$PERSIST_FAMILY"
+		install_persist "$PERSIST_FAMILY" || warn "persistence install failed (the patch itself installed successfully - see errors above); kernel updates will revert to stock until you rerun install.sh"
 	else
 		warn "--persist requested but no supported package manager (pacman/apt/dnf) was detected - skipping. See docs/PERSISTENCE.md to wire a hook manually for your distro."
 	fi

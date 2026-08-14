@@ -205,28 +205,56 @@ detect_deploy_mode() {
 		return 0
 		;;
 	esac
-	# dm/lvm/luks: walk slaves under sysfs for an nvme ancestor.
-	local base s
-	base="$(basename "$resolved")"
-	if [ -d "/sys/class/block/$base/slaves" ]; then
-		for s in "/sys/class/block/$base/slaves"/*; do
-			[ -e "$s" ] || continue
-			case "$(basename "$s")" in
-			nvme*)
-				DETECTED_MODE="A"
-				return 0
-				;;
-			esac
-		done
+	# dm/lvm/luks: walk the slaves graph to a fixed point for an nvme ancestor
+	# anywhere underneath - a single level is not enough (LUKS-on-LVM-on-nvme,
+	# the default encrypted Ubuntu/Fedora layout, is dm-crypt -> lvm -> nvme,
+	# 2 levels).
+	local base
+	# Resolve /dev/mapper/<name> (or any symlink) to the kernel block name
+	# (dm-N) that /sys/class/block uses; a bare /dev/dm-N or /dev/nvme* passes
+	# through unchanged. Without this the slaves walk below can't find the
+	# sysfs node for an LVM/LUKS mapper name and would misdetect Mode B.
+	base="$(basename "$(readlink -f "$resolved" 2>/dev/null || printf '%s' "$resolved")")"
+	_GDS_SLAVES_VISITED=""
+	if _gds_slaves_has_nvme_ancestor "$base" 0; then
+		DETECTED_MODE="A"
+		return 0
 	fi
 	DETECTED_MODE="B"
 	return 0
 }
 
+# _gds_slaves_has_nvme_ancestor <blockdev-basename> <depth>
+# True if <blockdev-basename> is itself nvme*, or if any device reachable by
+# recursively walking /sys/class/block/<dev>/slaves is nvme* - i.e. the
+# device sits (transitively, through any number of dm/lvm/luks layers) on an
+# nvme drive. Depth-capped and visited-tracked so a pathological or cyclic
+# sysfs graph can't loop forever; a real block-device stack should never
+# cycle, this is a safety margin only.
+_GDS_SLAVES_VISITED=""
+_gds_slaves_has_nvme_ancestor() {
+	local dev="$1" depth="$2" s sbase
+	case "$dev" in
+	nvme*) return 0 ;;
+	esac
+	[ "$depth" -ge 16 ] && return 1
+	case " $_GDS_SLAVES_VISITED " in
+	*" $dev "*) return 1 ;;
+	esac
+	_GDS_SLAVES_VISITED="$_GDS_SLAVES_VISITED $dev"
+	[ -d "/sys/class/block/$dev/slaves" ] || return 1
+	for s in "/sys/class/block/$dev/slaves"/*; do
+		[ -e "$s" ] || continue
+		sbase="$(basename "$s")"
+		_gds_slaves_has_nvme_ancestor "$sbase" $((depth + 1)) && return 0
+	done
+	return 1
+}
+
 # Find another installed kernel (not the running one) that still has a stock
 # nvme module and its own initramfs, to serve as a rescue path for Mode A.
 detect_rescue_kernel() {
-	local running d kver has_mod has_initrd
+	local running d kver has_mod has_initrd e pat
 	running="$(uname -r)"
 	for d in /lib/modules/*/; do
 		kver="$(basename "$d")"

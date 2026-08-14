@@ -129,12 +129,39 @@ depmod -a "$KVER"
 # ---- initramfs ----
 
 shopt -s nullglob
+initramfs_restored=0
 for f in "${BACKUP_DIR}"/initramfs/*; do
 	dest="/boot/$(basename "$f")"
 	info "restoring initramfs: $f -> $dest"
 	cp -a "$f" "$dest"
+	initramfs_restored=1
 done
 shopt -u nullglob
+
+# Belt-and-suspenders: an OLD backup dir (from before initramfs backups were
+# added to lib/rebuild.sh) can have the module backup but no initramfs/
+# contents. Rather than leave the patched module embedded in an unregenerated
+# initramfs, regenerate it directly from the just-restored stock module,
+# using the generator recorded for this kernel at install/rebuild time.
+if [ "$initramfs_restored" -eq 0 ]; then
+	warn "no initramfs backup found under ${BACKUP_DIR}/initramfs/ - the stock module is restored on disk, but the initramfs may still embed the patched module until it is regenerated."
+	if [ -n "${INITRD_GEN:-}" ] && [ -f "$SCRIPT_DIR/lib/detect.sh" ] && [ -f "$SCRIPT_DIR/lib/build.sh" ]; then
+		info "falling back to regenerating the initramfs directly ($INITRD_GEN) so it matches the restored stock module"
+		# shellcheck source=lib/detect.sh
+		. "$SCRIPT_DIR/lib/detect.sh"
+		# shellcheck source=lib/build.sh
+		. "$SCRIPT_DIR/lib/build.sh"
+		if regen_initramfs "$INITRD_GEN" "${MKINITCPIO_PRESET:-}"; then
+			info "initramfs regenerated for $KVER - now matches the restored stock module"
+		else
+			warn "initramfs regeneration failed - regenerate it manually (mkinitcpio -p <preset> / dracut --force --kver $KVER / update-initramfs -u -k $KVER) before rebooting into $KVER, or the patched module may still be embedded"
+		fi
+	elif [ -z "${INITRD_GEN:-}" ]; then
+		warn "no INITRD_GEN recorded in this kernel's state.env either - regenerate the initramfs manually before rebooting into $KVER"
+	else
+		warn "could not find lib/detect.sh + lib/build.sh next to this script ($SCRIPT_DIR/lib) - regenerate the initramfs manually (e.g. mkinitcpio -p <preset> / dracut --force / update-initramfs -u) before rebooting into $KVER"
+	fi
+fi
 
 # ---- bootloader cmdline ----
 
@@ -168,16 +195,26 @@ esac
 
 if [ "${MODE:-}" = "B" ]; then
 	nvme_usage="$(lsmod | awk '$1=="nvme"{print $3}')"
-	if [ -n "$nvme_usage" ] && [ "$nvme_usage" != "0" ]; then
+	if [ -z "$nvme_usage" ]; then
+		info "nvme module is not currently loaded - modprobe nvme"
+		modprobe nvme
+	elif [ "$nvme_usage" != "0" ]; then
 		warn "nvme module is in use - not force-unloading. The stock module is installed and will load on next boot/reload."
 	else
 		info "rmmod nvme && modprobe nvme (reloading stock module live)"
-		if rmmod nvme 2>/tmp/gds-nvme-patch-rmmod.err; then
+		err_f=""
+		err_f="$(mktemp 2>/dev/null)" || err_f=""
+		if rmmod nvme 2>"${err_f:-/dev/null}"; then
 			modprobe nvme
 		else
-			warn "rmmod nvme failed: $(cat /tmp/gds-nvme-patch-rmmod.err 2>/dev/null)"
+			if [ -n "$err_f" ]; then
+				warn "rmmod nvme failed: $(cat "$err_f" 2>/dev/null)"
+			else
+				warn "rmmod nvme failed (could not capture stderr - mktemp failed)"
+			fi
 			warn "the stock module is installed and will take effect on next boot regardless."
 		fi
+		[ -n "$err_f" ] && rm -f "$err_f"
 	fi
 fi
 
@@ -188,6 +225,32 @@ else
 	# mark this backup as consumed, but keep the files around (harmless, and
 	# lets a repeat run / manual recovery still find them).
 	mv "$STATE_FILE" "${STATE_FILE}.uninstalled-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+
+# ---- other still-patched kernels ----
+# This script only ever reverts the RUNNING kernel - warn if other installed
+# kernels (patched by install.sh directly, or by a kernel-update rebuild
+# hook) still have the patch installed, so that is never silently assumed
+# fixed too.
+other_backups=()
+for d in "${STATE_DIR}/backups"/*/; do
+	[ -d "$d" ] || continue
+	other_kver="$(basename "$d")"
+	[ "$other_kver" = "$KVER" ] && continue
+	# a live (not yet uninstalled) backup still has state.env; one already
+	# uninstalled was renamed to state.env.uninstalled-* above - skip those.
+	[ -f "${d}state.env" ] || continue
+	other_backups+=("$other_kver")
+done
+
+if [ "${#other_backups[@]}" -gt 0 ]; then
+	warn "${#other_backups[@]} other kernel(s) still have the patch installed: ${other_backups[*]}. Boot into each and rerun uninstall.sh to revert them (or use --purge to also drop their backups)."
+	if [ "$PURGE" -eq 1 ]; then
+		for k in "${other_backups[@]}"; do
+			info "--purge: removing backup dir ${STATE_DIR}/backups/${k} (this only drops the backup - kernel $k's own nvme module/initramfs are NOT reverted; boot into it and rerun uninstall.sh, or reinstall, if you still need a rollback path there)"
+			rm -rf "${STATE_DIR}/backups/${k}"
+		done
+	fi
 fi
 
 info "=== uninstall complete. Stock nvme module + initramfs restored for kernel $KVER. ==="
