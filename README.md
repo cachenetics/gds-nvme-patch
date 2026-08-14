@@ -28,14 +28,26 @@ VRAM (AI/ML, RAPIDS/kvikio, DALI) - especially on many-GPU, low-host-RAM rigs.
 
 ## Why a kernel patch?
 
-GDS needs the kernel's NVMe driver to register with NVIDIA's `nvidia-fs`. Stock kernels don't do
-this. NVIDIA ships the code only inside MOFED/DOCA, and only for kernels **<= 6.17**.
+For the NVMe to DMA straight into GPU memory, two drivers have to cooperate: the kernel's **NVMe
+driver** and NVIDIA's **`nvidia-fs`** module. They connect through one specific hook - the NVMe
+driver has to export a function (`nvme_v2_register_nvfs_dma_ops`) that `nvidia-fs` looks for when it
+loads. If that hook is present, `nvidia-fs` plugs into the NVMe I/O path and GDS works. If it's
+missing, cuFile just reports `NVMe : Unsupported` and there's nothing you can configure to fix it.
 
-Kernel **6.18 changed the NVMe DMA API**, and NVIDIA hasn't published a patch for it. So on current
-kernels GDS just reports `Unsupported`.
+Here's the problem:
 
-This repo is that missing piece - the NVMe registration hooks for the new API. It patches only the
-NVMe driver, so it is GPU-agnostic (a CMP 170HX was just the test card).
+1. **That hook is not in the stock kernel.** It's an out-of-tree patch NVIDIA maintains.
+2. **NVIDIA ships it only inside MOFED / DOCA-OFED**, not in the mainline kernel.
+3. **And only for the old NVMe code.** Their patch is written against the pre-6.18 DMA-mapping API,
+   so it only applies to kernels **<= 6.17**.
+4. **Kernel 6.18 rewrote the NVMe DMA path** to a new iterator API (`blk_rq_dma_map_iter`).
+   NVIDIA's patch doesn't fit the new code, and they haven't published an updated one.
+
+So on any current (6.18+) kernel there is simply no way to get that hook in - GDS is stuck at
+`Unsupported`, no matter what driver or CUDA version you install.
+
+**This repo is that missing hook, rewritten for the 6.18+ NVMe API.** It adds only the registration
+code to the NVMe driver - nothing GPU-specific (a CMP 170HX was just the test card).
 
 ---
 
