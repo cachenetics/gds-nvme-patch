@@ -169,7 +169,7 @@ verify_vermagic() {
 # finds a match and closes its end of the pipe, which can SIGPIPE nm before
 # it finishes writing (nonzero exit), and pipefail then reports THAT as the
 # pipeline's status even though grep's own match succeeded. Confirmed live
-# on the oberon validation run.
+# during validation.
 verify_nvfs_symbol() {
 	local ko="$1" out
 	command -v nm >/dev/null 2>&1 || { warn "nm not found, skipping symbol check"; return 0; }
