@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# gds-nvme-rebuild - fail-safe rebuild of the patched nvme module for ONE
+# kernel version. Called by the kernel-update persistence hooks (pacman/
+# apt/dnf, see hooks/) after a new kernel package lands; also runnable by
+# hand: gds-nvme-rebuild <kernel-version>.
+#
+# This is the STABLE, hook-facing entry point. Once install.sh --persist has
+# copied this repo (this file + lib/{detect,build,rebuild}.sh +
+# lib/patch_nvme.py) to /usr/lib/gds-nvme-patch/, every hook calls THAT
+# persisted copy - never a git checkout, which may move or vanish. See
+# docs/PERSISTENCE.md.
+#
+# Deliberately NOT `set -e`/`set -o pipefail`: this runs unattended inside a
+# package manager transaction and must never exit nonzero in a way that
+# could fail that transaction. gds_rebuild_kernel (lib/rebuild.sh) already
+# guarantees it always returns 0; the `|| true` and final `exit 0` below are
+# belt-and-suspenders for anything above that call.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+info() { printf '[info] %s\n' "$*"; }
+warn() { printf '[warn] %s\n' "$*" >&2; }
+err()  { printf '[err ] %s\n' "$*" >&2; }
+
+KVER="${1:-}"
+if [ -z "$KVER" ]; then
+	err "usage: gds-nvme-rebuild <kernel-version> - no version given, nothing to do"
+	exit 0
+fi
+
+if ! . "$SCRIPT_DIR/lib/detect.sh" 2>/dev/null \
+	|| ! . "$SCRIPT_DIR/lib/build.sh" 2>/dev/null \
+	|| ! . "$SCRIPT_DIR/lib/rebuild.sh" 2>/dev/null; then
+	err "failed to source gds-nvme-patch lib files under $SCRIPT_DIR/lib - is this copy intact?"
+	exit 0
+fi
+
+GDS_REBUILD_REPO_ROOT="$SCRIPT_DIR"
+gds_rebuild_kernel "$KVER" || true
+exit 0

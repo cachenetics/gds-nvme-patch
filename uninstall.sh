@@ -14,21 +14,32 @@ abort() { err "$*"; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: uninstall.sh [--dry-run] [-h|--help]
+Usage: uninstall.sh [--dry-run] [--purge] [-h|--help]
 
-  --dry-run  Print what would be restored, touch nothing.
+  --dry-run  Print what would be restored/removed, touch nothing.
+  --purge    Also delete this kernel's backup dir under
+             /var/lib/gds-nvme-patch/backups/ (module/initramfs/bootloader
+             backups + state.env) once the restore is done. Without this,
+             backups are left in place (harmless, lets you reinstall later
+             or recover manually).
   -h, --help Show this help.
 
 Restores the stock nvme module + initramfs (and bootloader cmdline edit, if
-any) that install.sh backed up for the currently running kernel. Only ever
-acts on the running kernel's backup - other installed kernels are untouched.
+any) that install.sh (or a kernel-update rebuild hook) backed up for the
+currently running kernel - only ever acts on the running kernel's backup,
+other installed kernels are untouched. Also removes any kernel-update
+persistence hook (pacman/apt/dnf) and the /usr/lib/gds-nvme-patch/ tool copy
+that `install.sh --persist` installed - that part is host-wide and runs
+regardless of whether the running kernel has a backup to restore.
 EOF
 }
 
 DRY_RUN=0
+PURGE=0
 for a in "$@"; do
 	case "$a" in
 	--dry-run) DRY_RUN=1 ;;
+	--purge) PURGE=1 ;;
 	-h | --help)
 		usage
 		exit 0
@@ -45,11 +56,37 @@ if [ "$(id -u)" -ne 0 ]; then
 	abort "must be run as root (sudo ./uninstall.sh ${*})"
 fi
 
+# ---- persistence removal (hooks + stable tool copy) ------------------------
+# Host-wide, independent of whether the CURRENTLY RUNNING kernel has install
+# state - runs (or is reported, under --dry-run) regardless, before the
+# per-kernel restore below (which can still abort if this kernel has nothing
+# to restore).
+PERSIST_TARGETS=(
+	/etc/pacman.d/hooks/gds-nvme-patch.hook
+	/etc/kernel/postinst.d/zz-gds-nvme-patch
+	/etc/kernel/install.d/95-gds-nvme-patch.install
+	/usr/lib/gds-nvme-patch
+)
+persist_found=0
+for t in "${PERSIST_TARGETS[@]}"; do
+	[ -e "$t" ] || continue
+	persist_found=1
+	if [ "$DRY_RUN" -eq 1 ]; then
+		info "would remove: $t"
+	else
+		info "removing: $t"
+		rm -rf "$t"
+	fi
+done
+[ "$persist_found" -eq 1 ] || info "no persistence hook/tool copy found (nothing to remove there)"
+
+# ---- per-kernel module/initramfs/cmdline restore (existing behavior) -------
+
 KVER="$(uname -r)"
 BACKUP_DIR="${STATE_DIR}/backups/${KVER}"
 STATE_FILE="${BACKUP_DIR}/state.env"
 
-[ -f "$STATE_FILE" ] || abort "no install state found for kernel $KVER at $STATE_FILE - nothing to uninstall (either never installed on this kernel, or already uninstalled)"
+[ -f "$STATE_FILE" ] || abort "no install state found for kernel $KVER at $STATE_FILE - nothing to restore for THIS kernel (either it was never patched, or it was already uninstalled). Any persistence hook/tool copy was already handled above."
 
 # shellcheck source=/dev/null
 . "$STATE_FILE"
@@ -72,6 +109,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
 	*) info "no cmdline changes to restore (cmdline step was '$CMDLINE_STEP' at install time)" ;;
 	esac
 	info "would run: depmod -a $KVER"
+	if [ "$PURGE" -eq 1 ]; then
+		info "--purge: would remove backup dir $BACKUP_DIR"
+	else
+		info "would mark $STATE_FILE as consumed (backup dir $BACKUP_DIR left in place; use --purge to remove it)"
+	fi
 	info "--dry-run: nothing touched."
 	exit 0
 fi
@@ -139,9 +181,14 @@ if [ "${MODE:-}" = "B" ]; then
 	fi
 fi
 
-# mark this backup as consumed, but keep the files around (harmless, and lets
-# a repeat run / manual recovery still find them).
-mv "$STATE_FILE" "${STATE_FILE}.uninstalled-$(date -u +%Y%m%dT%H%M%SZ)"
+if [ "$PURGE" -eq 1 ]; then
+	info "--purge: removing backup dir $BACKUP_DIR"
+	rm -rf "$BACKUP_DIR"
+else
+	# mark this backup as consumed, but keep the files around (harmless, and
+	# lets a repeat run / manual recovery still find them).
+	mv "$STATE_FILE" "${STATE_FILE}.uninstalled-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 
 info "=== uninstall complete. Stock nvme module + initramfs restored for kernel $KVER. ==="
 [ "${MODE:-}" = "A" ] && info "reboot to fully return to the stock module if you rebooted into the patched one."

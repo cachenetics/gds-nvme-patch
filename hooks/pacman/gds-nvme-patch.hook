@@ -1,0 +1,25 @@
+#
+# gds-nvme-patch.hook - pacman hook: re-patch the nvme driver for any kernel
+# that just landed a modules tree (fresh install or upgrade). Installed by
+# `install.sh --persist` at /etc/pacman.d/hooks/gds-nvme-patch.hook.
+#
+# Fires on Install/Upgrade of anything that drops a vmlinuz under
+# usr/lib/modules/<kver>/ (i.e. any kernel package). Runs PostTransaction so
+# the new kernel's headers package (if pulled in by the same transaction)
+# and the new modules tree are both fully in place first.
+#
+# The trigger script (pacman-trigger.sh) is intentionally fail-safe: it
+# never exits nonzero, so a problem here never fails the pacman transaction
+# itself - see its header comment and lib/rebuild.sh for the full contract.
+#
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = gds-nvme-patch: rebuilding GDS nvme driver for updated kernel(s)...
+When = PostTransaction
+Exec = /usr/lib/gds-nvme-patch/pacman-trigger.sh
+NeedsTargets

@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 # lib/detect.sh - distro/kernel/environment detection for gds-nvme-patch.
-# Sourced by install.sh (and, sparingly, uninstall.sh). Every detect_* function
-# sets one or more DETECTED_* globals and returns nonzero on failure so the
-# caller can decide abort-vs-warn. No side effects other than reading files -
-# safe to run without root.
+# Sourced by install.sh (and, sparingly, uninstall.sh), and by lib/rebuild.sh
+# via the gds-nvme-rebuild CLI. Every detect_* function sets one or more
+# DETECTED_* globals and returns nonzero on failure so the caller can decide
+# abort-vs-warn. No side effects other than reading files - safe to run
+# without root.
+
+# ---- kernel version override --------------------------------------------
+# GDS_KVER lets a caller target a kernel version OTHER than the running one
+# (lib/rebuild.sh does this - it rebuilds for a just-installed kernel during
+# an unattended package-manager transaction, not the kernel this process is
+# running under). Every place below that used to hardcode `$(uname -r)` now
+# reads $GDS_KVER instead, so install.sh (GDS_KVER unset -> defaults to the
+# running kernel, identical to before) and the rebuild hook (GDS_KVER set to
+# the target kernel) share this exact same detection code. Set once, here,
+# the first time this file is sourced.
+GDS_KVER="${GDS_KVER:-$(uname -r)}"
 
 # ---- arch / kernel -----------------------------------------------------
 
@@ -13,7 +25,7 @@ detect_arch() {
 }
 
 detect_kernel_release() {
-	DETECTED_KVER="$(uname -r)"
+	DETECTED_KVER="$GDS_KVER"
 	# the bare X.Y.Z used to fetch the matching stable-tree tag (strip any
 	# distro suffix like "-2-cachyos" or "-arch1-1").
 	DETECTED_KVER_BARE="$(printf '%s' "$DETECTED_KVER" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
@@ -36,15 +48,15 @@ detect_nvme_api_era() {
 }
 
 detect_headers() {
-	DETECTED_KDIR="/lib/modules/$(uname -r)/build"
+	DETECTED_KDIR="/lib/modules/$GDS_KVER/build"
 	[ -d "$DETECTED_KDIR" ] && [ -f "$DETECTED_KDIR/Makefile" ]
 }
 
-# Toolchain the running kernel itself was built with, read from its own
+# Toolchain the target kernel itself was built with, read from its own
 # .config - a locally-built gcc kernel with a clang userspace (or vice versa)
 # would otherwise mismatch and refuse to load the module (vermagic/GCC ABI).
 detect_toolchain() {
-	local cfg="/lib/modules/$(uname -r)/build/.config"
+	local cfg="/lib/modules/$GDS_KVER/build/.config"
 	if [ -f "$cfg" ] && grep -q '^CONFIG_CC_IS_CLANG=y' "$cfg"; then
 		DETECTED_TOOLCHAIN="clang"
 	else
@@ -55,7 +67,7 @@ detect_toolchain() {
 # ---- module compression -------------------------------------------------
 
 detect_module_compression() {
-	local dir="/lib/modules/$(uname -r)/kernel/drivers/nvme/host"
+	local dir="/lib/modules/$GDS_KVER/kernel/drivers/nvme/host"
 	if [ -f "$dir/nvme.ko.zst" ]; then
 		DETECTED_MOD_COMPRESS="zst"
 	elif [ -f "$dir/nvme.ko.xz" ]; then
@@ -83,12 +95,13 @@ detect_initramfs_generator() {
 	fi
 }
 
-# Best-effort match of the mkinitcpio preset for the RUNNING kernel. Preset
-# files don't reliably encode the kernel version in their name (e.g. a
-# distro kernel package "linux-cachyos" ships "linux-cachyos.preset"), so we
-# resolve each preset's ALL_kver/image path with `file` and compare the
-# embedded kernel version string against `uname -r`. Falls back to "the only
-# preset that exists" when there is exactly one.
+# Best-effort match of the mkinitcpio preset for the TARGET kernel ($GDS_KVER,
+# the running kernel unless overridden). Preset files don't reliably encode
+# the kernel version in their name (e.g. a distro kernel package
+# "linux-cachyos" ships "linux-cachyos.preset"), so we resolve each preset's
+# ALL_kver/image path with `file` and compare the embedded kernel version
+# string against $GDS_KVER. Falls back to "the only preset that exists" when
+# there is exactly one.
 detect_mkinitcpio_preset() {
 	local presets=(/etc/mkinitcpio.d/*.preset)
 	if [ ! -e "${presets[0]}" ]; then
@@ -106,12 +119,12 @@ detect_mkinitcpio_preset() {
 		[ -z "$img" ] && img="$(grep -oP '(?<=_image=").*linux[^"]*(?="[[:space:]]*$)' "$p" 2>/dev/null | head -1 || true)"
 		[ -z "$img" ] || [ ! -f "$img" ] && continue
 		ver="$(file -b "$img" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ,]*' | head -1 || true)"
-		if [ -n "$ver" ] && [ "$ver" = "$(uname -r)" ]; then
+		if [ -n "$ver" ] && [ "$ver" = "$GDS_KVER" ]; then
 			DETECTED_MKINITCPIO_PRESET="$(basename "$p" .preset)"
 			return 0
 		fi
 	done
-	err "could not match a mkinitcpio preset to running kernel $(uname -r) (found ${#presets[@]} presets)"
+	err "could not match a mkinitcpio preset to target kernel $GDS_KVER (found ${#presets[@]} presets)"
 	return 1
 }
 
@@ -151,15 +164,15 @@ detect_grub_mkconfig_bin() {
 	fi
 }
 
-# Locate the single systemd-boot loader entry for the running kernel. Return
-# nonzero (caller prints manual instructions) rather than guess if there is
-# not exactly one plausible match.
+# Locate the single systemd-boot loader entry for the target kernel
+# ($GDS_KVER). Return nonzero (caller prints manual instructions) rather than
+# guess if there is not exactly one plausible match.
 detect_systemd_boot_entry() {
 	local d="/boot/loader/entries" matches=() f
 	[ -d "$d" ] || return 1
 	for f in "$d"/*.conf; do
 		[ -f "$f" ] || continue
-		grep -q "$(uname -r)" "$f" && matches+=("$f")
+		grep -q "$GDS_KVER" "$f" && matches+=("$f")
 	done
 	if [ "${#matches[@]}" -eq 1 ]; then
 		DETECTED_SDBOOT_ENTRY="${matches[0]}"

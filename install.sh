@@ -25,7 +25,7 @@ abort() { err "$*"; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: install.sh [--dry-run] [--force] [--src-dir=PATH] [-h|--help]
+Usage: install.sh [--dry-run] [--force] [--src-dir=PATH] [--persist|--no-persist] [-h|--help]
 
   --dry-run      Detect, fetch, patch, build, and verify vermagic only. Does
                  not touch /lib/modules, /boot, depmod, or reload anything.
@@ -37,6 +37,13 @@ Usage: install.sh [--dry-run] [--force] [--src-dir=PATH] [-h|--help]
                  source does not match (e.g. 'apt-get source linux' on Ubuntu,
                  then --src-dir=./linux-<ver>). Also used automatically if a
                  local kernel source tree is detected.
+  --persist      (default) After a successful install, copy this tool to
+                 /usr/lib/gds-nvme-patch/ and install a distro-appropriate
+                 kernel-update hook (pacman/apt/dnf) so future kernel updates
+                 auto-rebuild the patch instead of silently reverting to the
+                 stock nvme driver. See docs/PERSISTENCE.md.
+  --no-persist   Skip the above; a kernel update will revert to stock nvme
+                 until you rerun install.sh by hand.
   -h, --help     Show this help.
 EOF
 }
@@ -44,11 +51,14 @@ EOF
 DRY_RUN=0
 FORCE=0
 SRC_DIR=""
+PERSIST=1
 for a in "$@"; do
 	case "$a" in
 	--dry-run) DRY_RUN=1 ;;
 	--force) FORCE=1 ;;
 	--src-dir=*) SRC_DIR="${a#*=}" ;;
+	--persist) PERSIST=1 ;;
+	--no-persist) PERSIST=0 ;;
 	-h | --help)
 		usage
 		exit 0
@@ -60,6 +70,61 @@ for a in "$@"; do
 		;;
 	esac
 done
+
+# ---- persistence helpers (kernel-update hook install) ----------------------
+# Pure detection (no writes) so it can run before the root check and be
+# reused by both the --dry-run report and the real --persist install below.
+detect_persist_family() {
+	if command -v pacman >/dev/null 2>&1 && [ -d /etc/pacman.d ]; then
+		printf 'pacman\n'
+		return 0
+	fi
+	if command -v dpkg >/dev/null 2>&1 || [ -d /etc/kernel/postinst.d ]; then
+		printf 'debian\n'
+		return 0
+	fi
+	if command -v rpm >/dev/null 2>&1 || [ -d /etc/kernel/install.d ]; then
+		printf 'fedora\n'
+		return 0
+	fi
+	return 1
+}
+
+# install_persist <family>
+# Copies the tool to a stable location and installs the one hook for
+# <family>. Only called after a real (non-dry-run) successful install.
+install_persist() {
+	local family="$1" target="/usr/lib/gds-nvme-patch"
+	info "installing persistence: copying tool to $target"
+	mkdir -p "$target/lib" "$target/hooks"
+	install -m 0644 "$REPO_ROOT/lib/patch_nvme.py" "$target/lib/patch_nvme.py"
+	install -m 0644 "$REPO_ROOT/lib/detect.sh" "$target/lib/detect.sh"
+	install -m 0644 "$REPO_ROOT/lib/build.sh" "$target/lib/build.sh"
+	install -m 0644 "$REPO_ROOT/lib/rebuild.sh" "$target/lib/rebuild.sh"
+	install -m 0755 "$REPO_ROOT/gds-nvme-rebuild" "$target/gds-nvme-rebuild"
+
+	case "$family" in
+	pacman)
+		mkdir -p /etc/pacman.d/hooks
+		install -m 0755 "$REPO_ROOT/hooks/pacman/pacman-trigger.sh" "$target/pacman-trigger.sh"
+		install -m 0644 "$REPO_ROOT/hooks/pacman/gds-nvme-patch.hook" /etc/pacman.d/hooks/gds-nvme-patch.hook
+		info "installed pacman hook: /etc/pacman.d/hooks/gds-nvme-patch.hook"
+		;;
+	debian)
+		mkdir -p /etc/kernel/postinst.d
+		install -m 0755 "$REPO_ROOT/hooks/debian/zz-gds-nvme-patch" /etc/kernel/postinst.d/zz-gds-nvme-patch
+		info "installed debian kernel postinst hook: /etc/kernel/postinst.d/zz-gds-nvme-patch"
+		;;
+	fedora)
+		mkdir -p /etc/kernel/install.d
+		install -m 0755 "$REPO_ROOT/hooks/fedora/95-gds-nvme-patch.install" /etc/kernel/install.d/95-gds-nvme-patch.install
+		info "installed fedora kernel-install plugin (template-quality, see docs/PERSISTENCE.md): /etc/kernel/install.d/95-gds-nvme-patch.install"
+		;;
+	esac
+	info "persistence installed: future kernel updates for supported kernels will auto-rebuild the patch (sudo ./uninstall.sh removes these hooks + $target)"
+}
+
+PERSIST_FAMILY="$(detect_persist_family || true)"
 
 if [ -n "$SRC_DIR" ] && [ ! -f "${SRC_DIR%/}/drivers/nvme/host/pci.c" ]; then
 	abort "--src-dir='$SRC_DIR' does not contain drivers/nvme/host/pci.c"
@@ -185,6 +250,15 @@ info "cmdline step:    $CMDLINE_STEP"
 if [ "$DRY_RUN" -eq 1 ]; then
 	info "--dry-run: stopping here. Nothing under /lib/modules, /boot, or the module tree was touched."
 	info "built module left at: $KO (removed on exit; use --dry-run output above to confirm before a real run)"
+	if [ "$PERSIST" -eq 1 ]; then
+		if [ -n "$PERSIST_FAMILY" ]; then
+			info "--persist plan: would copy tool to /usr/lib/gds-nvme-patch/ and install a $PERSIST_FAMILY kernel-update hook (not done under --dry-run)"
+		else
+			warn "--persist plan: no supported package manager (pacman/apt/dnf) detected - persistence would be SKIPPED even on a real run. See docs/PERSISTENCE.md to wire a hook manually."
+		fi
+	else
+		info "--no-persist: no kernel-update hook would be installed"
+	fi
 	exit 0
 fi
 
@@ -319,4 +393,16 @@ else
 		fi
 	fi
 	info "=== install complete. Module + initramfs + cmdline updated; effective now (live) and persists across reboots. ==="
+fi
+
+# ---- 11. persistence (survive future kernel updates) -----------------------
+
+if [ "$PERSIST" -eq 1 ]; then
+	if [ -n "$PERSIST_FAMILY" ]; then
+		install_persist "$PERSIST_FAMILY"
+	else
+		warn "--persist requested but no supported package manager (pacman/apt/dnf) was detected - skipping. See docs/PERSISTENCE.md to wire a hook manually for your distro."
+	fi
+else
+	info "--no-persist: skipping kernel-update persistence hook install"
 fi

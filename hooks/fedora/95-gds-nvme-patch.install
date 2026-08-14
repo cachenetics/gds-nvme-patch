@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# 95-gds-nvme-patch.install - Fedora/RHEL kernel-install plugin. Installed
+# by `install.sh --persist` at /etc/kernel/install.d/95-gds-nvme-patch.install
+# (executable). kernel-install(8) runs every executable under
+# /etc/kernel/install.d/ as:
+#   <script> <COMMAND> <KERNEL-VERSION> <ENTRY-DIR-or-BOOT-DIR> [<KERNEL-IMAGE>]
+# COMMAND is "add" on install/upgrade, "remove" on removal - we only act on
+# "add". The "95" prefix runs this late, after dracut (typically "50-...")
+# has already regenerated the initramfs once with the STOCK module; our own
+# regen_initramfs call re-regenerates it with the patched one if applicable.
+#
+# TEMPLATE QUALITY: written to the documented kernel-install plugin
+# contract but NOT exercised on a real Fedora/RHEL box - see
+# docs/PERSISTENCE.md. The pacman and Debian hooks are the tested ones.
+#
+# FAIL-SAFE: must never exit nonzero - that would surface as a failed
+# kernel-install step and could abort/flag the kernel installation. Every
+# step below swallows its own errors; the script always exits 0.
+set -u
+
+COMMAND="${1:-}"
+KVER="${2:-}"
+REBUILD="/usr/lib/gds-nvme-patch/gds-nvme-rebuild"
+
+[ "$COMMAND" = "add" ] || exit 0
+
+if [ -z "$KVER" ]; then
+	printf '[gds-nvme-patch] kernel-install hook: no kernel version argument given, skipping\n' >&2
+	exit 0
+fi
+
+if [ ! -x "$REBUILD" ]; then
+	printf '[gds-nvme-patch] %s not found or not executable, skipping\n' "$REBUILD" >&2
+	exit 0
+fi
+
+"$REBUILD" "$KVER" || printf '[gds-nvme-patch] %s: gds-nvme-rebuild itself failed unexpectedly (should not happen - it is meant to always exit 0)\n' "$KVER" >&2
+
+exit 0

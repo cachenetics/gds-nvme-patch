@@ -102,7 +102,9 @@ gdsio -D <dir on the NVMe> -d 0 -w 1 -s 32M -i 1M -x 0 -I 1 -V   # write+verify 
    kernel only, and leaves any other installed kernel as a rescue.
 5. **Sets `rootflags=data=ordered`** on the kernel cmdline (cuFile refuses ext4 unless it can
    verify `data=ordered` in the mount table) via the detected bootloader.
-6. Optionally installs a **DKMS**-style hook so the patch survives kernel updates (see `dkms/`).
+6. By default (**`--persist`**, disable with `--no-persist`) installs a kernel-update hook
+   (pacman/apt/dnf) so the patch survives future kernel updates instead of silently reverting to
+   the stock nvme driver - see "Kernel-update persistence" below and `docs/PERSISTENCE.md`.
 
 ## Will the DMA actually work? (topology)
 
@@ -117,6 +119,19 @@ P2P-DMA into GPU BAR1. That depends on your PCIe topology:
   will vary by board.
 - If the hardware genuinely cannot route the P2P, transfers fail/time out (they will not silently
   corrupt - GPU addresses are never handed to a normal dma_unmap).
+
+## Kernel-update persistence
+
+A kernel update replaces `nvme.ko` with the distro's stock one - without persistence, GDS silently
+breaks the next time you boot a new kernel. `install.sh` installs a kernel-update hook by default
+(`--persist`; use `--no-persist` to skip it) that reruns the fetch/patch/build/verify/install
+pipeline automatically whenever a new kernel package lands, for pacman (CachyOS/Arch - the tested
+path), apt/dpkg (Debian/Ubuntu), and dnf/rpm (Fedora/RHEL - template quality, see below). It is
+fail-safe by design: on any kernel it can't confidently patch (no headers yet, already patched, the
+patcher refuses, a build/verify step fails) it leaves that kernel's stock module untouched and logs
+why, rather than risk an unattended bad build. `sudo ./uninstall.sh` removes the installed hook and
+tool copy along with the usual module/initramfs restore. Full detail, what's tested vs
+template-quality, and why this isn't built on DKMS: `docs/PERSISTENCE.md`.
 
 ## A note on payoff
 

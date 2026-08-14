@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# zz-gds-nvme-patch - Debian/Ubuntu kernel postinst hook. Installed by
+# `install.sh --persist` at /etc/kernel/postinst.d/zz-gds-nvme-patch
+# (executable). The kernel package's postinst runs every executable script
+# under /etc/kernel/postinst.d/ with the new kernel's version as $1 - see
+# kernel-package(5) / linux-base's /usr/share/kernel/postinst.d convention.
+# The "zz" prefix runs this after the distro's own initramfs/bootloader
+# hooks in the same directory (best-effort ordering; not load-bearing).
+#
+# FAIL-SAFE: must never exit nonzero - that would surface as a failed
+# postinst step and could abort/flag the kernel package installation. Every
+# step below swallows its own errors; the script always exits 0.
+set -u
+
+KVER="${1:-}"
+REBUILD="/usr/lib/gds-nvme-patch/gds-nvme-rebuild"
+
+if [ -z "$KVER" ]; then
+	printf '[gds-nvme-patch] postinst hook: no kernel version argument given, skipping\n' >&2
+	exit 0
+fi
+
+if [ ! -x "$REBUILD" ]; then
+	printf '[gds-nvme-patch] %s not found or not executable, skipping\n' "$REBUILD" >&2
+	exit 0
+fi
+
+"$REBUILD" "$KVER" || printf '[gds-nvme-patch] %s: gds-nvme-rebuild itself failed unexpectedly (should not happen - it is meant to always exit 0)\n' "$KVER" >&2
+
+exit 0

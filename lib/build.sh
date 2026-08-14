@@ -28,11 +28,11 @@ _copy_nvme_from_dir() {
 }
 
 # Auto-detect a local kernel source tree that carries the .c files (not just
-# headers). Common on distros that ship a linux-source package or a source
-# symlink. Echoes the path, or nothing.
+# headers), for the target kernel ($GDS_KVER). Common on distros that ship a
+# linux-source package or a source symlink. Echoes the path, or nothing.
 _find_local_nvme_source() {
 	local kver cand
-	kver="$(uname -r)"
+	kver="$GDS_KVER"
 	for cand in \
 		"/lib/modules/${kver}/source" \
 		"/lib/modules/${kver}/build" \
@@ -108,15 +108,22 @@ fetch_nvme_source() { get_nvme_source "$1" "$2" "${3:-}"; }
 
 write_build_makefile() {
 	local dest="$1"
-	cat >"${dest}/Makefile" <<'EOF'
+	# KDIR is the TARGET kernel's headers ($GDS_KVER, the running kernel
+	# unless overridden) - baked in literally rather than left as
+	# `$(shell uname -r)`, because when lib/rebuild.sh builds for a kernel
+	# other than the one currently running, `uname -r` at make-time would
+	# resolve to the wrong (running) kernel. The heredoc is intentionally
+	# unquoted so $GDS_KVER expands now; make's own $(MAKE)/$(KDIR)/$(PWD)
+	# are backslash-escaped so make sees them literally.
+	cat >"${dest}/Makefile" <<EOF
 obj-m := nvme.o
 nvme-y := pci.o
-ccflags-y += -I$(src)
-KDIR := /lib/modules/$(shell uname -r)/build
+ccflags-y += -I\$(src)
+KDIR := /lib/modules/${GDS_KVER}/build
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) modules
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) clean
 EOF
 }
 
@@ -139,14 +146,15 @@ build_nvme_module() {
 }
 
 # verify_vermagic <ko-path>
-# Confirms the built module's vermagic matches the running kernel exactly.
+# Confirms the built module's vermagic matches the target kernel ($GDS_KVER,
+# the running kernel unless overridden) exactly.
 verify_vermagic() {
 	local ko="$1" got want
 	command -v modinfo >/dev/null 2>&1 || { err "modinfo not found"; return 1; }
 	got="$(modinfo -F vermagic "$ko" 2>/dev/null | awk '{print $1}')"
-	want="$(uname -r)"
+	want="$GDS_KVER"
 	if [ "$got" != "$want" ]; then
-		err "vermagic mismatch: built module reports '$got', running kernel is '$want'"
+		err "vermagic mismatch: built module reports '$got', target kernel is '$want'"
 		return 1
 	fi
 	return 0
@@ -199,6 +207,10 @@ compress_module_like() {
 }
 
 # regen_initramfs <generator> <preset-or-empty>
+# Regenerates for the target kernel ($GDS_KVER, the running kernel unless
+# overridden). mkinitcpio presets already resolve to a specific kernel's
+# image paths (see detect_mkinitcpio_preset), so only dracut/update-initramfs
+# need an explicit kernel version.
 regen_initramfs() {
 	local gen="$1" preset="${2:-}"
 	case "$gen" in
@@ -207,10 +219,10 @@ regen_initramfs() {
 		mkinitcpio -p "$preset"
 		;;
 	dracut)
-		dracut --force --kver "$(uname -r)"
+		dracut --force --kver "$GDS_KVER"
 		;;
 	update-initramfs)
-		update-initramfs -u -k "$(uname -r)"
+		update-initramfs -u -k "$GDS_KVER"
 		;;
 	*)
 		err "regen_initramfs: unknown generator '$gen'"
