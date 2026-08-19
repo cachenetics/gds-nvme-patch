@@ -118,8 +118,14 @@ gdsio -D <dir on the NVMe> -d 0 -w 1 -s 32M -i 1M -x 0 -I 1 -V
   skip.
 - **Will the P2P physically work?** The NVMe still has to reach GPU memory over PCIe - best when they
   share a switch. `probe.sh` shows your topology.
+- **A fast loader can still crash `nvidia-fs`.** Enabling GDS is not the whole story: loaders that
+  GDS-read straight into many destination buffers (e.g. vLLM's `fastsafetensors`) can hit a
+  concurrency race in `nvidia-fs` and crash or hang - easier to trip on slow/marginal P2P links.
+  It is a driver-side race, not this patch, and thread/queue knobs do not fix it. A loader-side fix
+  (bounded staging) and a drop-in vLLM loader are in `docs/RELIABLE-LOADING.md`.
 
-More detail: `docs/DEPLOYMENT-MODES.md` (reboot vs. live), `docs/PERSISTENCE.md`.
+More detail: `docs/DEPLOYMENT-MODES.md` (reboot vs. live), `docs/PERSISTENCE.md`,
+`docs/RELIABLE-LOADING.md` (loader crashes/hangs and how to avoid them).
 
 ---
 
